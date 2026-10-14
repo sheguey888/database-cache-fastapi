@@ -1,0 +1,6 @@
+fastapi[standard]
+sqlalchemy
+python-jose[cryptography]
+pwdlib[argon2]
+pytest
+httpx
