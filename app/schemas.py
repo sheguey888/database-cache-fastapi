@@ -49,9 +49,19 @@ class ConversationResponse(BaseModel):
 
 class MessageCreate(BaseModel):
     content: str = Field(min_length=1, max_length=20_000)
-    assistant_response: str = Field(min_length=1, max_length=20_000)
+    assistant_response: str | None = Field(default=None, min_length=1, max_length=20_000)
 
 
 class MessagePairResponse(BaseModel):
     user_message: MessageResponse
     assistant_message: MessageResponse
+
+
+class StudyPackCreate(BaseModel):
+    topic: str = Field(min_length=1, max_length=2_000)
+
+
+class StudyPackResponse(BaseModel):
+    summary: str
+    quiz: str
+    flashcards: str

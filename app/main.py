@@ -1,8 +1,10 @@
+import asyncio
+
 from fastapi import Depends, FastAPI, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
-from . import models
+from . import ai_service, models
 from .auth import (
     create_access_token,
     find_user_by_email,
@@ -17,6 +19,8 @@ from .schemas import (
     LoginRequest,
     MessageCreate,
     MessagePairResponse,
+    StudyPackCreate,
+    StudyPackResponse,
     TokenResponse,
     UserCreate,
     UserResponse,
@@ -24,6 +28,7 @@ from .schemas import (
 
 app = FastAPI(title="Private Conversations API")
 Base.metadata.create_all(bind=engine)
+AI_TIMEOUT_SECONDS = 5
 
 
 @app.get("/health")
@@ -108,18 +113,41 @@ def get_conversation(
 
 
 @app.post("/conversations/{conversation_id}/messages", response_model=MessagePairResponse)
-def add_message(
+async def add_message(
     conversation_id: int,
     payload: MessageCreate,
     user: models.User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> MessagePairResponse:
     conversation = owned_conversation(conversation_id, user, db)
+    if payload.assistant_response is None:
+        try:
+            assistant_response = await asyncio.wait_for(
+                ai_service.generate_text(payload.content),
+                timeout=AI_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            raise HTTPException(
+                status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+                detail="The AI response took too long. Please try again.",
+            ) from None
+        except ai_service.TemporaryAIError:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="The AI service is temporarily unavailable. Please try again.",
+            ) from None
+        except Exception:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="The AI response could not be generated.",
+            ) from None
+    else:
+        assistant_response = payload.assistant_response
     user_message = models.Message(
         conversation=conversation, role="user", content=payload.content
     )
     assistant_message = models.Message(
-        conversation=conversation, role="assistant", content=payload.assistant_response
+        conversation=conversation, role="assistant", content=assistant_response
     )
     db.add_all([user_message, assistant_message])
     db.commit()
@@ -128,3 +156,42 @@ def add_message(
     return MessagePairResponse(
         user_message=user_message, assistant_message=assistant_message
     )
+
+
+async def generate_study_pack(topic: str) -> StudyPackResponse:
+    try:
+        summary, quiz, flashcards = await asyncio.gather(
+            asyncio.wait_for(
+                ai_service.generate_text(topic, "summary"),
+                timeout=AI_TIMEOUT_SECONDS,
+            ),
+            asyncio.wait_for(
+                ai_service.generate_text(topic, "quiz"),
+                timeout=AI_TIMEOUT_SECONDS,
+            ),
+            asyncio.wait_for(
+                ai_service.generate_text(topic, "flashcards"),
+                timeout=AI_TIMEOUT_SECONDS,
+            ),
+        )
+    except asyncio.TimeoutError:
+        raise HTTPException(
+            status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+            detail="Generating the study pack took too long. Please try again.",
+        ) from None
+    except ai_service.TemporaryAIError:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="The AI service is temporarily unavailable. Please try again.",
+        ) from None
+    except Exception:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="The study pack could not be generated.",
+        ) from None
+    return StudyPackResponse(summary=summary, quiz=quiz, flashcards=flashcards)
+
+
+@app.post("/study-pack", response_model=StudyPackResponse)
+async def study_pack(payload: StudyPackCreate) -> StudyPackResponse:
+    return await generate_study_pack(payload.topic)
